@@ -102,6 +102,14 @@ class DataPipeline:
         if "SP500" in df.columns:
             df["SP500"] = df["SP500"].ffill(limit=1)
 
+        # CPI: monthly series — ffill across all business days
+        if "CPIAUCSL" in df.columns:
+            df["CPIAUCSL"] = df["CPIAUCSL"].ffill()
+
+        # Fed Funds Rate: monthly — ffill across business days
+        if "FEDFUNDS" in df.columns:
+            df["FEDFUNDS"] = df["FEDFUNDS"].ffill()
+
         # Drop days where too many columns are missing (>50%)
         threshold = len(df.columns) * 0.5
         df = df.dropna(thresh=int(threshold))
@@ -157,6 +165,16 @@ class DataPipeline:
         if "VIXCLS" in df.columns:
             result["vix_level"] = df["VIXCLS"]
 
+        # CPI: compute YoY inflation (uses ~252 business day lag for annual)
+        if "CPIAUCSL" in df.columns:
+            cpi = df["CPIAUCSL"]
+            result["inflation_yoy"] = cpi.pct_change(periods=252)  # approx 1 year of bdays
+            result["cpi_level"] = cpi
+
+        # Federal Funds Rate level (as fraction)
+        if "FEDFUNDS" in df.columns:
+            result["fed_rate"] = df["FEDFUNDS"] / 100.0  # percent → fraction
+
         # Drop first row (NaN from diff/returns)
         result = result.iloc[1:]
 
@@ -179,10 +197,11 @@ class DataPipeline:
         window = settings.rolling_zscore_window
         min_periods = settings.rolling_zscore_min_periods
 
-        # Columns to z-score (the change/return columns, not levels)
+        # Columns to z-score (the change/return columns, not levels or inflation)
         zscore_cols = [
             c for c in df.columns
-            if c.startswith("r_") or c.startswith("d_") or c.startswith("dvix") or c in ["cs", "slope", "curv"]
+            if (c.startswith("r_") or c.startswith("d_") or c.startswith("dvix") or c in ["cs", "slope", "curv"])
+            and c not in ["inflation_yoy", "cpi_level", "fed_rate"]
         ]
 
         result = df.copy()

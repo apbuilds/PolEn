@@ -45,14 +45,17 @@ async def refresh_state(synthetic: bool = False):
     """
     global _state_store
     try:
-        from app.data.pipeline import DataPipeline
+        from app.data.manager import DataManager
         from app.models.structure_features import compute_structure_features
         from app.models.kalman_em import KalmanEM
 
-        # Step 1: Run data pipeline
-        pipeline = DataPipeline()
-        use_synthetic = synthetic or pipeline.is_synthetic
-        df = pipeline.refresh(synthetic=use_synthetic)
+        # Step 1: Run data pipeline via DataManager
+        dm = DataManager()
+        use_synthetic = synthetic or dm.pipeline.is_synthetic
+        if use_synthetic:
+            df = dm.download_data(synthetic=True)
+        else:
+            df = dm.download_data(force=True)
 
         logger.info(f"Data pipeline complete: {len(df)} rows, cols={df.columns.tolist()}")
 
@@ -63,19 +66,28 @@ async def refresh_state(synthetic: bool = False):
 
         # Step 3: Run Kalman + EM
         Z_history = struct["Z_history"].values
-        kalman = KalmanEM(latent_dim=settings.latent_dim)
+        kalman = KalmanEM(latent_dim=settings.kalman_latent_dim)
         fit_result = kalman.fit(Z_history)
 
         # Step 4: Get latest state
         latest_state = kalman.get_latest_state()
+
+        # Step 5: Build 4-dim state with inflation
+        smoothed_4d = dm.build_state_matrix(kalman.smoothed_means)
+        inflation_gap = dm.get_inflation_gap()
+        fed_rate = dm.get_fed_rate_series()
 
         # Store everything
         _state_store = {
             "df": df,
             "structure": struct,
             "kalman": kalman,
+            "data_manager": dm,
             "fit_result": fit_result,
             "latest_state": latest_state,
+            "smoothed_4d": smoothed_4d,
+            "inflation_gap": float(inflation_gap.iloc[-1]) if len(inflation_gap) > 0 else 0.0,
+            "fed_rate": float(fed_rate.iloc[-1]) if len(fed_rate) > 0 else 0.03,
             "latest_date": str(df.index[-1].date()),
             "is_synthetic": use_synthetic,
         }
@@ -85,6 +97,8 @@ async def refresh_state(synthetic: bool = False):
             "latest_date": _state_store["latest_date"],
             "regime_label": latest_state["regime_label"],
             "stress_score": latest_state["stress_score"],
+            "inflation_gap": _state_store["inflation_gap"],
+            "fed_rate": _state_store["fed_rate"],
             "data_points": len(df),
             "is_synthetic": use_synthetic,
         }
@@ -116,6 +130,8 @@ async def get_current_state():
         "stress_score": latest["stress_score"],
         "regime_label": latest["regime_label"],
         "crisis_threshold": latest["crisis_threshold"],
+        "inflation_gap": _state_store.get("inflation_gap", 0.0),
+        "fed_rate": _state_store.get("fed_rate", 0.03),
         "metrics": struct["metrics"],
         "correlation_matrix": [row.tolist() for row in struct["R_t"]],
         "correlation_labels": struct["labels"],

@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes_state import router as state_router
 from app.api.routes_policy import router as policy_router
+from app.api.routes_rl import router as rl_router
 from app.ws.sim_stream import handle_simulation
 
 logging.basicConfig(
@@ -59,6 +60,7 @@ app.add_middleware(
 # Include REST routers
 app.include_router(state_router)
 app.include_router(policy_router)
+app.include_router(rl_router)
 
 
 # WebSocket endpoint

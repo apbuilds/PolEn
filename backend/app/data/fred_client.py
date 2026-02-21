@@ -143,12 +143,12 @@ class FREDClient:
         return status
 
 
-def generate_synthetic_data(n_days: int = 6300) -> pd.DataFrame:
+def generate_synthetic_data(n_days: int = 9000) -> pd.DataFrame:
     """
     Generate realistic synthetic cross-asset data for demo mode.
 
-    Produces ~25 years of daily data with realistic correlations and regime dynamics.
-    This is used when FRED_API_KEY is not available.
+    Produces ~36 years of daily data (1990–present) with realistic
+    correlations, regime dynamics, inflation, and Fed rate series.
 
     Returns:
         DataFrame with columns matching FRED series names
@@ -233,6 +233,33 @@ def generate_synthetic_data(n_days: int = 6300) -> pd.DataFrame:
         baa_spread_boost = np.linspace(0, 2.0, end - start)
         baa[start:end] += baa_spread_boost
 
+    # CPI level (monthly, interpolated to daily) — start ~130, grow ~2.5%/yr
+    cpi = np.zeros(n)
+    cpi[0] = 130.0  # CPI index level circa 1990
+    for i in range(1, n):
+        # ~2.5% annualized with some noise, plus factor sensitivity
+        daily_infl = 0.025 / 252 + 0.001 * (0.2 * factors[i, 0] + 0.3 * np.random.randn())
+        cpi[i] = cpi[i - 1] * (1 + daily_infl)
+    # Introduce disinflation / inflation episodes
+    for start, end in crisis_periods:
+        # Deflationary pressure during crises
+        deflation = np.linspace(1.0, 0.997, end - start)
+        cpi[start:end] *= np.cumprod(deflation)
+
+    # Federal Funds Rate (mean-reverting, responds to growth/inflation)
+    fedfunds = np.zeros(n)
+    fedfunds[0] = 5.0  # ~1990 level
+    for i in range(1, n):
+        # Taylor-rule-like mean reversion
+        target = 2.5 + 0.5 * factors[i, 0]  # higher when growth is up
+        fedfunds[i] = fedfunds[i - 1] + 0.005 * (target - fedfunds[i - 1]) + 0.02 * np.random.randn()
+    fedfunds = np.clip(fedfunds, 0.0, 8.0)
+    # ZLB episodes near crisis periods
+    for start, end in crisis_periods:
+        post_crisis_end = min(end + int(0.05 * n), n)
+        fedfunds[start:post_crisis_end] *= np.linspace(1.0, 0.05, post_crisis_end - start)
+        fedfunds[start:post_crisis_end] = np.clip(fedfunds[start:post_crisis_end], 0.0, 8.0)
+
     df = pd.DataFrame(
         {
             "SP500": sp500,
@@ -242,6 +269,8 @@ def generate_synthetic_data(n_days: int = 6300) -> pd.DataFrame:
             "VIXCLS": vix,
             "DTWEXBGS": usd,
             "DGS5": dgs5,
+            "CPIAUCSL": cpi,
+            "FEDFUNDS": fedfunds,
         },
         index=dates,
     )

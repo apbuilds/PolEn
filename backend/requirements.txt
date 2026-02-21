@@ -14,3 +14,11 @@ pydantic==2.5.2
 pydantic-settings==2.1.0
 pytest==7.4.3
 pytest-asyncio==0.23.2
+
+# Neural transition + RL upgrade
+torch>=2.1.0
+gymnasium>=0.29.0
+stable-baselines3>=2.2.0
+tensorboard>=2.15.0
+streamlit>=1.29.0
+pyyaml>=6.0
