@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 from typing import Optional
+from datetime import datetime
 
 from fastapi import WebSocket, WebSocketDisconnect
 import numpy as np
@@ -71,6 +72,7 @@ async def handle_simulation(websocket: WebSocket):
             speed_ms = int(params.get("speed_ms", settings.mc_default_speed_ms))
             shocks = params.get("shocks", None)
             regime_switching = params.get("regime_switching", True)
+            start_date = params.get("start_date", None)
 
             # Clamp parameters
             N = max(500, min(10000, N))
@@ -80,13 +82,24 @@ async def handle_simulation(websocket: WebSocket):
             kalman = store["kalman"]
             latest = store["latest_state"]
 
+            # Optional: override init state from historical snapshot
+            init_mu = np.array(latest["mu_T"], dtype=np.float64)
+            init_P = np.array(latest["P_T"], dtype=np.float64)
+            if start_date:
+                snapshots = store.get("historical_snapshots", {})
+                snap = _resolve_snapshot(snapshots, start_date)
+                if snap is not None:
+                    init_mu = np.array(snap.get("mu_T", init_mu), dtype=np.float64)
+                    init_P = np.array(snap.get("P_T", init_P), dtype=np.float64)
+                    logger.info(f"WS simulation init from historical snapshot: requested={start_date} actual={snap.get('date')}")
+
             try:
                 engine = MonteCarloEngine(
                     A_daily=kalman.A,
                     B_daily=kalman.B,
                     Q_daily=kalman.Q,
-                    mu_T=np.array(latest["mu_T"]),
-                    P_T=np.array(latest["P_T"]),
+                    mu_T=init_mu,
+                    P_T=init_P,
                     crisis_threshold=latest["crisis_threshold"],
                     stress_std=latest["stress_std"],
                 )
@@ -102,8 +115,12 @@ async def handle_simulation(websocket: WebSocket):
                 )
 
                 # Stream results step by step with delay
-                for step_data in steps:
+                for idx, step_data in enumerate(steps):
                     step_data["done"] = False
+                    # First step includes initial state so frontend can show deviations
+                    if idx == 0:
+                        step_data["initial_mu"] = init_mu.tolist()
+                        step_data["start_date"] = start_date or store.get("latest_date", "")
                     await websocket.send_json(step_data)
                     await asyncio.sleep(speed_ms / 1000.0)
 
@@ -125,3 +142,26 @@ async def handle_simulation(websocket: WebSocket):
             await websocket.close(code=1011, reason=str(e))
         except Exception:
             pass
+
+
+def _resolve_snapshot(snapshots: dict, date_str: str) -> Optional[dict]:
+    """Return the snapshot closest to the requested date string (YYYY-MM-DD)."""
+    if not snapshots:
+        return None
+
+    if date_str in snapshots:
+        return snapshots[date_str]
+
+    try:
+        target = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+    dates = sorted(snapshots.keys())
+    if not dates:
+        return None
+
+    closest = min(
+        dates, key=lambda d: abs(datetime.strptime(d, "%Y-%m-%d") - target)
+    )
+    return snapshots.get(closest)

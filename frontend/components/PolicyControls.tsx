@@ -1,5 +1,5 @@
 import React from "react";
-import { SimParams } from "../pages/index";
+import { SimParams } from "./SimulationSidebar";
 import InfoTooltip from "./InfoTooltip";
 
 interface PolicyControlsProps {

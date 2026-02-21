@@ -36,7 +36,7 @@ _reward = _yaml.get("reward", {})
 
 class Settings(BaseSettings):
     # ── Secrets / env vars ──────────────────────────────────────
-    fred_api_key: str = os.environ.get("FRED_API_KEY", "")
+    fred_api_key: str = ""
 
     # ── Paths ───────────────────────────────────────────────────
     data_cache_dir: Path = _BACKEND_ROOT / "data_cache"
@@ -54,6 +54,8 @@ class Settings(BaseSettings):
         "DGS5": "DGS5",
         "CPIAUCSL": "CPIAUCSL",       # CPI All Urban Consumers
         "FEDFUNDS": "FEDFUNDS",        # Effective Federal Funds Rate
+        "USREC": "USREC",             # NBER Recession Indicator (1=recession)
+        "T10Y2Y": "T10Y2Y",           # 10Y-2Y spread (yield curve)
     }
 
     # ── Data architecture ───────────────────────────────────────
@@ -83,11 +85,21 @@ class Settings(BaseSettings):
 
     # ── Default regime transition matrix (3×3 row-stochastic) ───
     default_transition_matrix: list = [
-        [0.95, 0.05, 0.00],
-        [0.05, 0.90, 0.05],
-        [0.00, 0.10, 0.90],
+        [0.92, 0.07, 0.01],
+        [0.05, 0.88, 0.07],
+        [0.02, 0.08, 0.90],
     ]
     regime_noise_scales: list = [1.0, 1.8, 3.0]
+    # Regime-dependent A-matrix decay: A_regime = A * scale
+    regime_A_scales: list = [1.0, 0.97, 0.92]
+    # Student-t degrees of freedom for fat-tailed noise
+    student_t_df: float = 5.0
+    # Policy transmission lag (months)
+    policy_lag_months: int = 3
+    # Policy geometric decay factor
+    policy_decay: float = 0.7
+    # Indirect stress-from-growth coupling
+    stress_growth_coupling: float = 0.15
 
     # ── Monte Carlo defaults ────────────────────────────────────
     mc_default_paths: int = 5000
@@ -174,6 +186,8 @@ class Settings(BaseSettings):
 
     class Config:
         env_prefix = ""
+        env_file = str(_BACKEND_ROOT / ".env")
+        env_file_encoding = "utf-8"
 
 
 settings = Settings()

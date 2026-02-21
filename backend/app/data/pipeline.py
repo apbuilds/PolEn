@@ -88,10 +88,14 @@ class DataPipeline:
         df = df.reindex(bday_idx)
         df.index.name = "date"
 
-        # Forward-fill yields for short gaps (<=3 days)
-        yield_cols = [c for c in ["DGS2", "DGS5", "DGS10", "BAA"] if c in df.columns]
-        for col in yield_cols:
+        # Forward-fill daily yields for short gaps (<=3 days)
+        daily_yield_cols = [c for c in ["DGS2", "DGS5", "DGS10"] if c in df.columns]
+        for col in daily_yield_cols:
             df[col] = df[col].ffill(limit=3)
+
+        # BAA corporate bond yield is monthly in FRED — ffill across all bdays
+        if "BAA" in df.columns:
+            df["BAA"] = df["BAA"].ffill()
 
         # VIX and dollar: ffill up to 3 days
         for col in ["VIXCLS", "DTWEXBGS"]:
@@ -109,6 +113,14 @@ class DataPipeline:
         # Fed Funds Rate: monthly — ffill across business days
         if "FEDFUNDS" in df.columns:
             df["FEDFUNDS"] = df["FEDFUNDS"].ffill()
+
+        # USREC: monthly recession indicator — ffill
+        if "USREC" in df.columns:
+            df["USREC"] = df["USREC"].ffill()
+
+        # T10Y2Y: daily yield curve spread — ffill short gaps
+        if "T10Y2Y" in df.columns:
+            df["T10Y2Y"] = df["T10Y2Y"].ffill(limit=3)
 
         # Drop days where too many columns are missing (>50%)
         threshold = len(df.columns) * 0.5
@@ -175,13 +187,25 @@ class DataPipeline:
         if "FEDFUNDS" in df.columns:
             result["fed_rate"] = df["FEDFUNDS"] / 100.0  # percent → fraction
 
+        # NBER recession indicator (passthrough for backtest scoring)
+        if "USREC" in df.columns:
+            result["usrec"] = df["USREC"]
+
+        # Yield curve spread (T10Y2Y) — inversion signal
+        if "T10Y2Y" in df.columns:
+            result["t10y2y"] = df["T10Y2Y"]
+
         # Drop first row (NaN from diff/returns)
         result = result.iloc[1:]
 
-        # Drop rows with NaN in critical columns
+        # Drop rows with too many NaN critical columns.
+        # We use a threshold rather than requiring ALL, because some series
+        # (SP500 starts ~2013, DTWEXBGS ~2006) while others go back to 1990.
         critical = [c for c in ["r_spx", "dvix", "d_DGS10", "cs"] if c in result.columns]
         if critical:
-            result = result.dropna(subset=critical)
+            min_required = max(2, len(critical) - 1)  # allow 1 missing
+            critical_present = result[critical].notnull().sum(axis=1)
+            result = result[critical_present >= min_required]
 
         return result
 
@@ -214,9 +238,16 @@ class DataPipeline:
             z_col = f"z_{col}"
             result[z_col] = (df[col] - roll_mean) / roll_std
 
-        # Drop initial rows where z-scores are NaN
+        # Keep rows where a *majority* of z-scores are available, rather than
+        # requiring ALL — otherwise the latest-starting series (z_r_spx from
+        # ~2013) would truncate the entire dataset.
         z_cols = [c for c in result.columns if c.startswith("z_")]
         if z_cols:
-            result = result.dropna(subset=z_cols)
+            # Core z-score columns that should always be present
+            core_z = [c for c in ["z_dvix", "z_d_DGS10", "z_cs"] if c in z_cols]
+            if core_z:
+                result = result.dropna(subset=core_z)
+            else:
+                result = result.dropna(subset=z_cols, how="all")
 
         return result

@@ -69,6 +69,19 @@ def daily_to_monthly_params(
     n = A_daily.shape[0]
     d = days_per_month
 
+    # ── Enforce stationarity on A_daily BEFORE powering ──
+    eig_daily = np.linalg.eigvals(A_daily)
+    spectral_radius_daily = float(np.max(np.abs(eig_daily)))
+    if spectral_radius_daily >= 1.0:
+        rescale = 1.0 / (1.05 * spectral_radius_daily)
+        A_daily = A_daily * rescale
+        logger.warning(
+            f"[Stationarity] A_daily spectral radius {spectral_radius_daily:.4f} >= 1.0 "
+            f"→ rescaled by {rescale:.4f} to {float(np.max(np.abs(np.linalg.eigvals(A_daily)))):.4f}"
+        )
+    else:
+        logger.info(f"[Stationarity] A_daily spectral radius {spectral_radius_daily:.4f} — OK")
+
     # A_monthly = A^d via eigendecomposition
     try:
         eigenvalues, V = la.eig(A_daily)
@@ -78,6 +91,19 @@ def daily_to_monthly_params(
     except (la.LinAlgError, ValueError):
         # Fallback: iterative matrix power
         A_monthly = np.linalg.matrix_power(A_daily, d)
+
+    # ── Verify monthly stationarity ──
+    eig_monthly = np.linalg.eigvals(A_monthly)
+    sr_monthly = float(np.max(np.abs(eig_monthly)))
+    if sr_monthly >= 1.0:
+        rescale_m = 1.0 / (1.05 * sr_monthly)
+        A_monthly = A_monthly * rescale_m
+        logger.warning(
+            f"[Stationarity] A_monthly spectral radius {sr_monthly:.4f} >= 1.0 "
+            f"→ rescaled to {float(np.max(np.abs(np.linalg.eigvals(A_monthly)))):.4f}"
+        )
+    else:
+        logger.info(f"[Stationarity] A_monthly spectral radius {sr_monthly:.4f} — OK")
 
     # Q_monthly: geometric series of noise accumulation
     # Q_monthly = sum_{k=0}^{d-1} A^k Q (A^k)^T
@@ -118,11 +144,22 @@ def _simulate_paths_numba(
     initial_regime: int,
     crisis_threshold: float,
     seed: int,
+    regime_A_scales: np.ndarray,
+    policy_lag: int,
+    policy_decay: float,
+    stress_growth_coupling: float,
+    student_t_df: float,
 ) -> tuple:
     """
     Core Monte Carlo simulation loop (Numba JIT compiled).
 
-    Returns per-step statistics for streaming.
+    Fixes applied:
+    - Mean-reverting transition (no drift bias)
+    - Delayed policy transmission (growth at lag, stress indirect)
+    - Regime-dependent A scaling
+    - Student-t noise (fat tails)
+    - Crisis probability = stress > threshold OR regime == Crisis
+    - Empirical ES95 (mean of stress >= VaR95)
     """
     n = A.shape[0]
     np.random.seed(seed)
@@ -147,15 +184,15 @@ def _simulate_paths_numba(
     n_spag = min(30, N)
     spaghetti = np.zeros((H, n_spag))
 
-    # Control input
-    u = np.zeros((1, 1))
-    u[0, 0] = delta_bps
+    # Policy effect: delayed and decaying
+    # Build a policy impulse array over horizon
+    policy_impulse = np.zeros(H)
+    for t in range(H):
+        lag_t = t - policy_lag
+        if lag_t >= 0:
+            policy_impulse[t] = delta_bps * (policy_decay ** lag_t)
 
-    Bu = np.zeros(n)
-    for i in range(n):
-        Bu[i] = B[i, 0] * delta_bps
-
-    # Initialize N paths
+    # Initialize N paths from prior
     X = np.zeros((N, n))
     regimes = np.full(N, initial_regime, dtype=np.int64)
 
@@ -172,7 +209,7 @@ def _simulate_paths_numba(
 
     for step in range(H):
         for i in range(N):
-            # Regime transition
+            # 1) Regime transition FIRST (before state update)
             if regime_switching:
                 u_rand = np.random.random()
                 curr = regimes[i]
@@ -183,24 +220,45 @@ def _simulate_paths_numba(
                         break
                 regimes[i] = new_regime
 
-            # Noise scaling
-            scale = noise_scales[regimes[i]] if regime_switching else 1.0
+            # 2) Regime-dependent A scaling
+            a_scale = regime_A_scales[regimes[i]] if regime_switching else 1.0
 
-            # Sample noise
-            z = np.random.randn(n)
+            # 3) Noise scaling (regime-dependent variance)
+            noise_scale = noise_scales[regimes[i]] if regime_switching else 1.0
+
+            # 4) Student-t noise for fat tails
+            # Approximate: normal * sqrt(df / chi2(df))
+            z_norm = np.random.randn(n)
+            # chi2 with df degrees of freedom = sum of df standard normals squared
+            chi2_val = 0.0
+            for _k in range(int(student_t_df)):
+                _zz = np.random.randn()
+                chi2_val += _zz * _zz
+            chi2_val = max(chi2_val, 0.01)  # avoid division by zero
+            t_scale = np.sqrt(student_t_df / chi2_val)
+
             noise = np.zeros(n)
             for j in range(n):
                 for k in range(n):
-                    noise[j] += Q_chol[j, k] * z[k]
-                noise[j] *= np.sqrt(scale)
+                    noise[j] += Q_chol[j, k] * z_norm[k]
+                noise[j] *= t_scale * np.sqrt(noise_scale)
 
-            # Transition
+            # 5) Mean-reverting transition: X_{t+1} = A_regime * X_t + noise
+            #    NO constant Bu offset — policy enters through growth channel only
             new_x = np.zeros(n)
             for j in range(n):
-                new_x[j] = Bu[j]
                 for k in range(n):
-                    new_x[j] += A[j, k] * X[i, k]
+                    new_x[j] += (A[j, k] * a_scale) * X[i, k]
                 new_x[j] += noise[j]
+
+            # 6) Delayed policy effect on GROWTH (index 2) only
+            if n > 2:
+                new_x[2] += B[2, 0] * policy_impulse[step]
+
+            # 7) Indirect stress effect from growth
+            #    stress_{t+1} += coupling * (-growth_t)
+            if n > 2:
+                new_x[0] += stress_growth_coupling * (-X[i, 2])
 
             for j in range(n):
                 X[i, j] = new_x[j]
@@ -208,7 +266,7 @@ def _simulate_paths_numba(
         # Collect statistics
         for i in range(N):
             stress_vals[i] = X[i, 0]
-            growth_vals[i] = X[i, 2]
+            growth_vals[i] = X[i, 2] if n > 2 else 0.0
 
         # Sort for percentiles
         stress_sorted = np.sort(stress_vals)
@@ -232,19 +290,24 @@ def _simulate_paths_numba(
         growth_p75[step] = growth_sorted[idx_75]
         growth_p95[step] = growth_sorted[idx_95]
 
-        # Crisis probability
+        # Crisis probability: stress > threshold OR regime == Crisis (2)
         n_crisis = 0
         for i in range(N):
             if stress_vals[i] > crisis_threshold:
                 n_crisis += 1
+            elif regime_switching and regimes[i] == 2:
+                n_crisis += 1
         crisis_prob[step] = n_crisis / N
 
-        # ES95 stress (expected shortfall: mean of top 5%)
-        n_tail = max(1, N - idx_95)
+        # Empirical ES95: mean of stress where stress >= VaR95
+        var95 = stress_sorted[idx_95]
         es_sum = 0.0
-        for i in range(idx_95, N):
-            es_sum += stress_sorted[i]
-        es95_stress[step] = es_sum / n_tail
+        es_count = 0
+        for i in range(N):
+            if stress_vals[i] >= var95:
+                es_sum += stress_vals[i]
+                es_count += 1
+        es95_stress[step] = es_sum / max(1, es_count)
 
         # Spaghetti
         for i in range(n_spag):
@@ -272,12 +335,25 @@ def simulate_paths_numpy(
     initial_regime: int,
     crisis_threshold: float,
     seed: int,
-) -> tuple:
-    """Pure numpy fallback (used if Numba not available)."""
+    regime_A_scales: np.ndarray = None,
+    policy_lag: int = 3,
+    policy_decay: float = 0.7,
+    stress_growth_coupling: float = 0.15,
+    student_t_df: float = 5.0,
+) -> list:
+    """Pure numpy fallback with all structural fixes applied."""
     n = A.shape[0]
     rng = np.random.default_rng(seed)
 
-    Bu = (B @ np.array([[delta_bps]])).flatten()
+    if regime_A_scales is None:
+        regime_A_scales = np.array([1.0, 0.97, 0.92])
+
+    # Build delayed policy impulse array
+    policy_impulse = np.zeros(H)
+    for t in range(H):
+        lag_t = t - policy_lag
+        if lag_t >= 0:
+            policy_impulse[t] = delta_bps * (policy_decay ** lag_t)
 
     # Initialize
     Z0 = rng.standard_normal((N, n))
@@ -289,7 +365,7 @@ def simulate_paths_numpy(
     results_per_step = []
 
     for step in range(H):
-        # Regime transitions
+        # 1) Regime transitions FIRST
         if regime_switching:
             u_rand = rng.random(N)
             new_regimes = np.zeros(N, dtype=int)
@@ -303,23 +379,44 @@ def simulate_paths_numpy(
                     new_regimes[i] = 2
             regimes = new_regimes
 
-        # Noise
-        Z = rng.standard_normal((N, n))
+        # 2) Student-t noise (fat tails)
+        Z_norm = rng.standard_normal((N, n))
+        chi2_samples = rng.chisquare(df=student_t_df, size=N)
+        chi2_samples = np.maximum(chi2_samples, 0.01)
+        t_scales = np.sqrt(student_t_df / chi2_samples)  # (N,)
+
         if regime_switching:
             scales = noise_scales[regimes]
-            noise = (Z @ Q_chol.T) * np.sqrt(scales[:, np.newaxis])
+            noise = (Z_norm @ Q_chol.T) * t_scales[:, np.newaxis] * np.sqrt(scales[:, np.newaxis])
         else:
-            noise = Z @ Q_chol.T
+            noise = (Z_norm @ Q_chol.T) * t_scales[:, np.newaxis]
 
-        # Transition
-        X = X @ A.T + Bu[np.newaxis, :] + noise
+        # 3) Save current growth for indirect stress coupling
+        growth_current = X[:, 2].copy() if n > 2 else np.zeros(N)
+
+        # 4) Mean-reverting transition with regime-dependent A scaling
+        #    NO constant Bu offset
+        if regime_switching:
+            X_new = np.zeros_like(X)
+            for r in range(3):
+                mask = (regimes == r)
+                if np.any(mask):
+                    X_new[mask] = X[mask] @ (A * regime_A_scales[r]).T
+            X = X_new + noise
+        else:
+            X = X @ A.T + noise
+
+        # 5) Delayed policy effect on GROWTH channel only
+        if n > 2:
+            X[:, 2] += B[2, 0] * policy_impulse[step]
+
+        # 6) Indirect stress from growth
+        if n > 2:
+            X[:, 0] += stress_growth_coupling * (-growth_current)
 
         # Statistics
         stress = X[:, 0]
-        growth = X[:, 2]
-
-        stress_sorted = np.sort(stress)
-        growth_sorted = np.sort(growth)
+        growth = X[:, 2] if n > 2 else np.zeros(N)
 
         stress_fan = {
             "p5": float(np.percentile(stress, 5)),
@@ -336,9 +433,16 @@ def simulate_paths_numpy(
             "p95": float(np.percentile(growth, 95)),
         }
 
-        cp = float(np.mean(stress > crisis_threshold))
-        top5_idx = int(0.95 * N)
-        es95 = float(np.mean(stress_sorted[top5_idx:]))
+        # Crisis prob: stress > threshold OR regime == Crisis
+        crisis_mask = (stress > crisis_threshold)
+        if regime_switching:
+            crisis_mask = crisis_mask | (regimes == 2)
+        cp = float(np.mean(crisis_mask))
+
+        # Empirical ES95: mean of stress where stress >= VaR95
+        var95 = float(np.percentile(stress, 95))
+        tail_mask = stress >= var95
+        es95 = float(np.mean(stress[tail_mask])) if np.any(tail_mask) else var95
 
         spaghetti_step = [
             {"id": int(i), "stress": float(X[i, 0])} for i in range(n_spag)
@@ -376,10 +480,19 @@ class MonteCarloEngine:
         stress_std: float = 1.0,
     ):
         self.n = A_daily.shape[0]
-        self.crisis_threshold = crisis_threshold
         self.stress_std = stress_std
 
-        # Convert to monthly
+        # Crisis threshold: use a softer multiplier (1.0 × std) so that
+        # the MC-predicted crisis_prob better aligns with the ~15% base rate
+        # of the realized crisis indicator (expanding 85th-percentile stress).
+        # Previously 1.5× produced probabilities too low relative to realized.
+        self.crisis_threshold = 1.0 * stress_std
+        logger.info(
+            f"[CrisisThreshold] Using 1.0 × stress_std = 1.0 × {stress_std:.4f} "
+            f"= {self.crisis_threshold:.4f} (was {crisis_threshold:.4f})"
+        )
+
+        # Convert to monthly (stationarity enforced inside)
         self.A_monthly, self.Q_monthly, self.B_monthly = daily_to_monthly_params(
             A_daily, Q_daily, B_daily, settings.trading_days_per_month
         )
@@ -396,6 +509,13 @@ class MonteCarloEngine:
         )
 
         self.regime_model = RegimeModel()
+
+        # New config values
+        self.regime_A_scales = np.array(settings.regime_A_scales, dtype=np.float64)
+        self.policy_lag = settings.policy_lag_months
+        self.policy_decay = settings.policy_decay
+        self.stress_growth_coupling = settings.stress_growth_coupling
+        self.student_t_df = settings.student_t_df
 
     def apply_shocks(
         self,
@@ -467,6 +587,11 @@ class MonteCarloEngine:
                     N, H, regime_switching,
                     Pi_cumsum, noise_scales, initial_regime,
                     self.crisis_threshold, seed,
+                    self.regime_A_scales,
+                    self.policy_lag,
+                    self.policy_decay,
+                    self.stress_growth_coupling,
+                    self.student_t_df,
                 )
 
                 (sp5, sp25, sp50, sp75, sp95,
@@ -512,6 +637,11 @@ class MonteCarloEngine:
             N, H, regime_switching,
             Pi_cumsum, noise_scales, initial_regime,
             self.crisis_threshold, seed,
+            regime_A_scales=self.regime_A_scales,
+            policy_lag=self.policy_lag,
+            policy_decay=self.policy_decay,
+            stress_growth_coupling=self.stress_growth_coupling,
+            student_t_df=self.student_t_df,
         )
 
         for r in results:

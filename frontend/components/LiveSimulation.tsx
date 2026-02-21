@@ -11,7 +11,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-import { StepData } from "../pages/index";
+import { StepData } from "./CoreCharts";
 
 interface LiveSimulationProps {
   data: StepData[];

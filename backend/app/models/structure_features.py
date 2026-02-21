@@ -73,17 +73,21 @@ def compute_structure_features(
             f"Not enough data ({n} rows) for rolling window ({window})"
         )
 
-    # Compute rolling features for last portion of data
-    # For efficiency, compute full Z_history over last 2 years (~500 days)
-    lookback = min(n, 500 + window)
-    data_slice = market_data.iloc[-lookback:]
+    # Compute rolling features for the FULL available history (not just the
+    # last ~2 years).  This is critical for backtesting over decades.
+    # Sub-sampling: compute every `step` days and then resample to monthly for
+    # Z_history to keep memory and runtime manageable for long histories.
+    step = max(1, 5 if n > 5000 else 1)   # every 5 bdays ≈ weekly for long histories
+    data_slice = market_data
 
     feature_records = []
     dates = []
+    corr_records = []
+    eigen_records = []
 
     d = len(available_cols)
 
-    for i in range(window, len(data_slice)):
+    for i in range(window, len(data_slice), step):
         w = data_slice.iloc[i - window : i].values  # shape (window, d)
 
         # Covariance matrix
@@ -124,7 +128,12 @@ def compute_structure_features(
         # Additional features from the data
         row = data_slice.iloc[i]
         cs_level = row.get("z_cs", 0.0) if "z_cs" in available_cols else 0.0
-        slope_val = df["slope"].iloc[-lookback + i] if "slope" in df.columns else 0.0
+        # slope from the main df at the matching date
+        date_i = data_slice.index[i]
+        if "slope" in df.columns and date_i in df.index:
+            slope_val = float(df.loc[date_i, "slope"])
+        else:
+            slope_val = 0.0
 
         # Rolling std of dvix (volatility of volatility)
         if "z_dvix" in available_cols:
@@ -146,6 +155,8 @@ def compute_structure_features(
 
         feature_records.append(feature_vec)
         dates.append(data_slice.index[i])
+        corr_records.append(corr_mat.tolist())
+        eigen_records.append(eigenvalues.tolist())
 
     feature_names = [
         "lambda_concentration",
@@ -159,6 +170,21 @@ def compute_structure_features(
     ]
 
     Z_history = pd.DataFrame(feature_records, index=dates, columns=feature_names)
+
+    # Resample to end-of-month so downstream (Kalman, backtest) sees monthly data
+    Z_history = Z_history.resample("M").last().dropna(how="all")
+
+    # Build monthly correlation / eigenvalue snapshots.
+    # Later entries in the same month overwrite earlier ones (i.e. we keep
+    # the last observation of each month, matching Z_history's resample).
+    monthly_corr_snapshots: dict = {}
+    for idx_snap, snap_date in enumerate(dates):
+        month_key = snap_date.strftime("%Y-%m")
+        monthly_corr_snapshots[month_key] = {
+            "date": snap_date.strftime("%Y-%m-%d"),
+            "correlation_matrix": corr_records[idx_snap],
+            "eigenvalues": eigen_records[idx_snap],
+        }
 
     # Latest values
     latest_Z = feature_records[-1]
@@ -199,4 +225,5 @@ def compute_structure_features(
         "metrics": metrics,
         "Z_history": Z_history,
         "feature_names": feature_names,
+        "monthly_corr_snapshots": monthly_corr_snapshots,
     }

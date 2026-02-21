@@ -424,9 +424,16 @@ def train_from_pipeline() -> dict:
     logger.info("=== Neural transition: building dataset from pipeline ===")
 
     dm = DataManager()
-    df = dm.load_local_data()
-    if df is None or len(df) == 0:
+
+    # Always force a fresh pipeline run to ensure full historical data.
+    # The pipeline will fetch from FRED (or generate synthetic) and rebuild
+    # the processed cache, giving us ~8000+ daily rows back to 1990.
+    df = dm.download_data(force=True)
+    if df is None or len(df) < 500:
+        logger.warning(f"Real data too small ({0 if df is None else len(df)} rows) — falling back to synthetic")
         df = dm.download_data(synthetic=True)
+
+    logger.info(f"Training data: {len(df)} daily rows, {df.index.min().date()} → {df.index.max().date()}")
 
     struct = compute_structure_features(df, window=settings.rolling_cov_window)
     Z_history = struct["Z_history"].values

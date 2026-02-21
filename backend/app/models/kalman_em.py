@@ -356,6 +356,42 @@ class KalmanEM:
         x_filt, P_filt, x_pred, P_pred, log_lik = self.kalman_filter(Z, u)
         x_smooth, P_smooth, cross_covs = self.rts_smoother(x_filt, P_filt, x_pred, P_pred)
 
+        # ── Sign correction for the stress dimension ──────────────
+        # PCA initialisation and EM iterations can assign an arbitrary sign
+        # to each latent dimension.  We need the first dimension ("stress")
+        # to increase when observable stress rises.  The structural features
+        # in Z are ordered so that Z[:, 0] (lambda_concentration) and most
+        # other columns increase during stress.  Check correlation of
+        # filtered X[0] with the column-mean of Z.  If negative, flip
+        # dimension 0 via the similarity transform  D = diag(-1, 1, …, 1).
+        z_mean_per_step = Z.mean(axis=1)          # (T,) average feature per month
+        filtered_stress = x_filt[:, 0]              # (T,)
+        corr_sign = np.corrcoef(z_mean_per_step, filtered_stress)[0, 1]
+
+        if corr_sign < 0:
+            logger.info(
+                f"Flipping latent dim-0 sign (corr with obs = {corr_sign:.3f})"
+            )
+            n = self.n
+            D = np.eye(n)
+            D[0, 0] = -1.0
+
+            # Similarity transform on parameters:  X' = D X
+            #   A' = D A D,  Q' = D Q D,  C' = C D,  B' = D B
+            self.A = D @ self.A @ D
+            self.Q = D @ self.Q @ D
+            self.C = self.C @ D
+            self.B = D @ self.B
+            self.x0 = D @ self.x0
+            self.P0 = D @ self.P0 @ D
+
+            # Flip states
+            x_filt[:, 0]   *= -1
+            x_smooth[:, 0] *= -1
+            for t in range(len(P_filt)):
+                P_filt[t]   = D @ P_filt[t] @ D
+                P_smooth[t] = D @ P_smooth[t] @ D
+
         self.filtered_means = x_filt
         self.filtered_covs = P_filt
         self.smoothed_means = x_smooth
