@@ -1,0 +1,203 @@
+"""
+Data preprocessing pipeline.
+
+Aligns cross-asset data to business days, handles missing values,
+computes transformations (returns, spreads, slopes), and applies
+rolling z-score normalization.
+"""
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+from app.config import settings
+from app.data.fred_client import FREDClient, generate_synthetic_data
+
+logger = logging.getLogger(__name__)
+
+
+class DataPipeline:
+    """End-to-end data preprocessing from raw FRED series to model-ready features."""
+
+    def __init__(self):
+        self.client = FREDClient()
+        self.processed_path = settings.processed_cache_dir / "merged.parquet"
+        self._merged: Optional[pd.DataFrame] = None
+
+    @property
+    def is_synthetic(self) -> bool:
+        return not self.client.has_key
+
+    def refresh(self, force: bool = False, synthetic: bool = False) -> pd.DataFrame:
+        """
+        Full pipeline: fetch → align → transform → normalize → save.
+
+        Args:
+            force: Force re-fetch from FRED
+            synthetic: Use synthetic data even if FRED key available
+
+        Returns:
+            Processed DataFrame ready for feature extraction
+        """
+        if synthetic or self.is_synthetic:
+            logger.info("Using synthetic data (FRED_API_KEY not set or synthetic requested)")
+            raw_df = generate_synthetic_data()
+        else:
+            raw_series = self.client.fetch_all(force_refresh=force)
+            raw_df = self._merge_raw(raw_series)
+
+        aligned = self._align_to_bdays(raw_df)
+        transformed = self._compute_transforms(aligned)
+        normalized = self._rolling_zscore(transformed)
+
+        # Save processed
+        normalized.to_parquet(self.processed_path)
+        self._merged = normalized
+        logger.info(f"Pipeline complete: {len(normalized)} days, {normalized.columns.tolist()}")
+        return normalized
+
+    def get_processed(self) -> pd.DataFrame:
+        """Load processed data from cache or run pipeline."""
+        if self._merged is not None:
+            return self._merged
+        if self.processed_path.exists():
+            self._merged = pd.read_parquet(self.processed_path)
+            return self._merged
+        return self.refresh()
+
+    def _merge_raw(self, series_dict: dict[str, pd.Series]) -> pd.DataFrame:
+        """Merge individual series into a single DataFrame aligned by date."""
+        frames = {}
+        for name, s in series_dict.items():
+            s = s.dropna()
+            s.index = pd.DatetimeIndex(s.index)
+            frames[name] = s
+
+        df = pd.DataFrame(frames)
+        df.index.name = "date"
+        df = df.sort_index()
+        return df
+
+    def _align_to_bdays(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Align to business day calendar and handle missing values."""
+        # Resample to business days
+        bday_idx = pd.bdate_range(start=df.index.min(), end=df.index.max(), freq="B")
+        df = df.reindex(bday_idx)
+        df.index.name = "date"
+
+        # Forward-fill yields for short gaps (<=3 days)
+        yield_cols = [c for c in ["DGS2", "DGS5", "DGS10", "BAA"] if c in df.columns]
+        for col in yield_cols:
+            df[col] = df[col].ffill(limit=3)
+
+        # VIX and dollar: ffill up to 3 days
+        for col in ["VIXCLS", "DTWEXBGS"]:
+            if col in df.columns:
+                df[col] = df[col].ffill(limit=3)
+
+        # SP500: do NOT ffill returns; but ffill level for up to 1 day for alignment
+        if "SP500" in df.columns:
+            df["SP500"] = df["SP500"].ffill(limit=1)
+
+        # Drop days where too many columns are missing (>50%)
+        threshold = len(df.columns) * 0.5
+        df = df.dropna(thresh=int(threshold))
+
+        return df
+
+    def _compute_transforms(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Compute derived features from raw levels.
+
+        Transformations:
+        - SP500: r_spx = log(SP500_t / SP500_{t-1})
+        - DTWEXBGS: r_usd = log(USD_t / USD_{t-1})
+        - VIXCLS: dvix = log(VIX_t / VIX_{t-1})  [log changes]
+        - Rates: keep levels; add changes ΔDGS2, ΔDGS10
+        - Credit spread: cs = BAA - DGS10
+        - Curve slope: slope = DGS10 - DGS2
+        - Curvature (if DGS5): curv = DGS10 - 2*DGS5 + DGS2
+        """
+        result = pd.DataFrame(index=df.index)
+
+        # Log returns for SP500
+        if "SP500" in df.columns:
+            result["r_spx"] = np.log(df["SP500"] / df["SP500"].shift(1))
+
+        # Log returns for dollar index
+        if "DTWEXBGS" in df.columns:
+            result["r_usd"] = np.log(df["DTWEXBGS"] / df["DTWEXBGS"].shift(1))
+
+        # Log changes for VIX
+        if "VIXCLS" in df.columns:
+            result["dvix"] = np.log(df["VIXCLS"] / df["VIXCLS"].shift(1))
+
+        # Yield levels
+        for col in ["DGS2", "DGS10"]:
+            if col in df.columns:
+                result[col] = df[col]
+                result[f"d_{col}"] = df[col].diff()
+
+        # Credit spread
+        if "BAA" in df.columns and "DGS10" in df.columns:
+            result["cs"] = df["BAA"] - df["DGS10"]
+
+        # Curve slope
+        if "DGS10" in df.columns and "DGS2" in df.columns:
+            result["slope"] = df["DGS10"] - df["DGS2"]
+
+        # Curvature (optional)
+        if all(c in df.columns for c in ["DGS10", "DGS5", "DGS2"]):
+            result["curv"] = df["DGS10"] - 2 * df["DGS5"] + df["DGS2"]
+
+        # VIX level for features
+        if "VIXCLS" in df.columns:
+            result["vix_level"] = df["VIXCLS"]
+
+        # Drop first row (NaN from diff/returns)
+        result = result.iloc[1:]
+
+        # Drop rows with NaN in critical columns
+        critical = [c for c in ["r_spx", "dvix", "d_DGS10", "cs"] if c in result.columns]
+        if critical:
+            result = result.dropna(subset=critical)
+
+        return result
+
+    def _rolling_zscore(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply rolling z-score normalization.
+
+        Window: 252 business days (1 year)
+        Min periods: 200
+
+        z_t = (x_t - rolling_mean) / rolling_std
+        """
+        window = settings.rolling_zscore_window
+        min_periods = settings.rolling_zscore_min_periods
+
+        # Columns to z-score (the change/return columns, not levels)
+        zscore_cols = [
+            c for c in df.columns
+            if c.startswith("r_") or c.startswith("d_") or c.startswith("dvix") or c in ["cs", "slope", "curv"]
+        ]
+
+        result = df.copy()
+
+        for col in zscore_cols:
+            roll_mean = df[col].rolling(window=window, min_periods=min_periods).mean()
+            roll_std = df[col].rolling(window=window, min_periods=min_periods).std()
+            # Avoid division by zero
+            roll_std = roll_std.replace(0, np.nan)
+            z_col = f"z_{col}"
+            result[z_col] = (df[col] - roll_mean) / roll_std
+
+        # Drop initial rows where z-scores are NaN
+        z_cols = [c for c in result.columns if c.startswith("z_")]
+        if z_cols:
+            result = result.dropna(subset=z_cols)
+
+        return result
