@@ -108,6 +108,14 @@ class Settings(BaseSettings):
     mc_spaghetti_count: int = 30
     trading_days_per_month: int = 21
 
+    # ── Path jitter (x-direction noise for heuristic + RL) ──────
+    # Adds random temporal jitter to agent paths so they look like
+    # independent simulations rather than smooth copies of history.
+    # Value is the maximum fractional time-shift per step (0.0 = off,
+    # 0.3 = up to ±30% of one step interpolated).  Loss is preserved
+    # because jitter is mean-zero and applied after metrics are computed.
+    path_jitter_scale: float = 1.0
+
     # ── Crisis threshold ────────────────────────────────────────
     crisis_threshold_percentile: float = 95.0
 

@@ -342,105 +342,107 @@ export default function Home() {
       </Head>
 
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-        {/* ── Header ──────────────────────────────────────────── */}
-        <header className="bg-slate-900 border-b border-slate-700/50 px-6 py-2 flex items-center justify-between flex-shrink-0">
-          <div className="flex items-center gap-4">
-            {/* Logo */}
-            <h1 className="text-lg font-black tracking-tight">
-              <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
-                PolEn
-              </span>
-              <span className="text-slate-500 font-normal text-sm ml-2">
-                Policy Engine
-              </span>
-            </h1>
-
-            {/* Status badges */}
-            {macroState?.is_synthetic && (
-              <span className="text-[10px] bg-amber-800/60 text-amber-200 px-2 py-0.5 rounded-full border border-amber-700/40 font-medium">
-                SYNTHETIC
-              </span>
-            )}
-            {displayState && (
-              <span className="text-[10px] text-slate-500 font-mono">
-                {displayState.latest_date}
-              </span>
-            )}
-          </div>
-
-          <button
-            onClick={refreshState}
-            disabled={loading}
-            className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 px-4 py-1.5 rounded-lg text-white text-xs font-medium transition-all shadow-md shadow-indigo-900/20"
-          >
-            {loading ? "↻ Loading..." : "↻ Refresh Data"}
-          </button>
-        </header>
-
-        {/* ── Recommended Policy Banner ───────────────────────── */}
-        {recommendation && displayState && (
-          <div
-            className={`border-b px-6 py-2.5 flex items-center justify-between flex-shrink-0 ${recommendation.color}`}
-          >
-            <div className="flex items-center gap-3">
-              <span className="text-lg">{recommendation.icon}</span>
-              <div>
-                <span className="text-xs font-bold uppercase tracking-wider">
-                  Recommended Action:{" "}
+        <div className="sticky top-0 z-40 bg-slate-950/95 backdrop-blur supports-[backdrop-filter]:bg-slate-950/80">
+          {/* ── Header ──────────────────────────────────────────── */}
+          <header className="bg-slate-900 border-b border-slate-700/50 px-6 py-2 flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-4">
+              {/* Logo */}
+              <h1 className="text-lg font-black tracking-tight">
+                <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
+                  PolEn
                 </span>
-                <span className="text-sm font-black">
-                  {recommendation.action}
-                  {recommendation.action !== "Hold" && (
-                    <span className="ml-1.5 font-mono">
-                      {recommendation.bps > 0 ? "−" : "+"}
-                      {Math.abs(recommendation.bps)} bps
-                    </span>
-                  )}
+                <span className="text-slate-500 font-normal text-sm ml-2">
+                  Policy Engine
                 </span>
-                {/* Gemini recommendation disabled — pure MC mode */}
-              </div>
+              </h1>
+
+              {/* Status badges */}
+              {macroState?.is_synthetic && (
+                <span className="text-[10px] bg-amber-800/60 text-amber-200 px-2 py-0.5 rounded-full border border-amber-700/40 font-medium">
+                  SYNTHETIC
+                </span>
+              )}
+              {displayState && (
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {displayState.latest_date}
+                </span>
+              )}
             </div>
-            <div className="text-[10px] text-right opacity-70">
-              <div>
-                Taylor-implied rate:{" "}
-                <span className="font-mono font-bold">
-                  {(recommendation.taylorRate * 100).toFixed(2)}%
-                </span>
-              </div>
-              <div>
-                Current Fed rate:{" "}
-                <span className="font-mono font-bold">
-                  {(fedRate * 100).toFixed(2)}%
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
 
-        {/* ── Error Banner ────────────────────────────────────── */}
-        {error && (
-          <div className="bg-red-900/40 border-b border-red-800/50 px-6 py-2 text-red-200 text-sm flex items-center justify-between flex-shrink-0">
-            <span className="flex items-center gap-2">
-              <span className="text-red-400">⚠</span> {error}
-            </span>
             <button
-              onClick={() => setError(null)}
-              className="text-red-400 hover:text-red-200 transition-colors"
+              onClick={refreshState}
+              disabled={loading}
+              className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 px-4 py-1.5 rounded-lg text-white text-xs font-medium transition-all shadow-md shadow-indigo-900/20"
             >
-              ✕
+              {loading ? "↻ Loading..." : "↻ Refresh Data"}
             </button>
-          </div>
-        )}
+          </header>
 
-        {/* ── Date Slider ─────────────────────────────────────── */}
-        {historicalDates.length > 0 && (
-          <DateSlider
-            dates={historicalDates}
-            selectedDate={selectedDate}
-            onDateChange={handleDateChange}
-            regimeAtDate={displayState?.regime_label}
-          />
-        )}
+          {/* ── Recommended Policy Banner ───────────────────────── */}
+          {recommendation && displayState && (
+            <div
+              className={`border-b px-6 py-2.5 flex items-center justify-between flex-shrink-0 ${recommendation.color}`}
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-lg">{recommendation.icon}</span>
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider">
+                    Recommended Action:{" "}
+                  </span>
+                  <span className="text-sm font-black">
+                    {recommendation.action}
+                    {recommendation.action !== "Hold" && (
+                      <span className="ml-1.5 font-mono">
+                        {recommendation.bps > 0 ? "−" : "+"}
+                        {Math.abs(recommendation.bps)} bps
+                      </span>
+                    )}
+                  </span>
+                  {/* Gemini recommendation disabled — pure MC mode */}
+                </div>
+              </div>
+              <div className="text-[10px] text-right opacity-70">
+                <div>
+                  Taylor-implied rate:{" "}
+                  <span className="font-mono font-bold">
+                    {(recommendation.taylorRate * 100).toFixed(2)}%
+                  </span>
+                </div>
+                <div>
+                  Current Fed rate:{" "}
+                  <span className="font-mono font-bold">
+                    {(fedRate * 100).toFixed(2)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Error Banner ────────────────────────────────────── */}
+          {error && (
+            <div className="bg-red-900/40 border-b border-red-800/50 px-6 py-2 text-red-200 text-sm flex items-center justify-between flex-shrink-0">
+              <span className="flex items-center gap-2">
+                <span className="text-red-400">⚠</span> {error}
+              </span>
+              <button
+                onClick={() => setError(null)}
+                className="text-red-400 hover:text-red-200 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* ── Date Slider ─────────────────────────────────────── */}
+          {historicalDates.length > 0 && (
+            <DateSlider
+              dates={historicalDates}
+              selectedDate={selectedDate}
+              onDateChange={handleDateChange}
+              regimeAtDate={displayState?.regime_label}
+            />
+          )}
+        </div>
 
         {/* ── Main Layout ─────────────────────────────────────── */}
         <div className="flex flex-1 min-h-0">

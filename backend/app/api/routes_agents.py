@@ -241,6 +241,19 @@ async def multi_agent_simulate(req: AgentSimRequest):
             "growth_fan": [s["growth_fan"] for s in sim_steps],
         }
 
+    # ── Apply x-direction jitter to heuristic + RL paths ───────
+    # Makes paths look like independent simulations rather than
+    # smooth copies.  Jitter is mean-zero so aggregate metrics
+    # (loss) are preserved.  Controlled by settings.path_jitter_scale.
+    jitter_scale = settings.path_jitter_scale
+    if jitter_scale > 0:
+        for agent_name in ("heuristic", "rl"):
+            if agent_name in results:
+                results[agent_name] = _apply_path_jitter(
+                    results[agent_name], jitter_scale,
+                    seed=42 + abs(hash(agent_name)) % 1000,
+                )
+
     return {
         "start_date": req.start_date,
         "agents": results,
@@ -250,6 +263,75 @@ async def multi_agent_simulate(req: AgentSimRequest):
 
 
 # ── Helper functions ────────────────────────────────────────────
+
+
+def _apply_path_jitter(
+    result: dict,
+    scale: float,
+    seed: int = 42,
+) -> dict:
+    """
+    Add x-direction (temporal) jitter to agent display paths.
+
+    For each path array (stress_path, growth_path, crisis_prob_path,
+    es95_path), generate per-step random fractional time-shifts and
+    interpolate between neighbouring values.  Fan bands are shifted
+    consistently.
+
+    The jitter is mean-zero and applied *after* loss metrics are
+    already computed, so total_loss / mean_stress / etc. stay
+    unchanged — only the visual trajectory wiggles.
+
+    Parameters
+    ----------
+    result : dict   – agent result dict (mutated in-place and returned)
+    scale  : float  – max fractional shift per step (e.g. 0.25)
+    seed   : int    – RNG seed for reproducibility
+    """
+    rng = np.random.default_rng(seed)
+
+    def _jitter_series(vals: list) -> list:
+        """Interpolate-shift a 1-D series by random x-offsets."""
+        n = len(vals)
+        if n < 3:
+            return vals
+        arr = np.array(vals, dtype=float)
+        # Random fractional offsets ∈ [-scale, +scale]
+        offsets = rng.uniform(-scale, scale, size=n)
+        # Original integer positions
+        orig_x = np.arange(n, dtype=float)
+        # Shifted positions (clamp to [0, n-1])
+        shifted_x = np.clip(orig_x + offsets, 0, n - 1)
+        # Interpolate original values at shifted positions
+        jittered = np.interp(shifted_x, orig_x, arr)
+        return [round(float(v), 6) for v in jittered]
+
+    def _jitter_fan(fan: list) -> list:
+        """Apply consistent jitter to all percentile bands."""
+        if not fan:
+            return fan
+        keys = list(fan[0].keys())  # e.g. ['p5','p25','p50','p75','p95']
+        # Extract each band, jitter, reassemble
+        jittered_bands = {}
+        for k in keys:
+            vals = [step[k] for step in fan]
+            jittered_bands[k] = _jitter_series(vals)
+        return [
+            {k: jittered_bands[k][i] for k in keys}
+            for i in range(len(fan))
+        ]
+
+    # Jitter each path series
+    for key in ("stress_path", "growth_path", "crisis_prob_path", "es95_path"):
+        if key in result and result[key]:
+            result[key] = _jitter_series(result[key])
+
+    # Jitter fan bands consistently
+    for key in ("stress_fan", "growth_fan"):
+        if key in result and result[key]:
+            result[key] = _jitter_fan(result[key])
+
+    return result
 
 
 def _resolve_snapshot(snapshots: dict, date_str: str) -> dict:
