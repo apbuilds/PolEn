@@ -96,8 +96,7 @@ async def _wait_for_rate_limit():
         _request_times_day.append(t)
 
 GEMINI_API_KEY = os.environ.get(
-    "GEMINI_API_KEY",
-    "AIzaSyBaJKxAtpc6vXz86vvwBytBdOqI20-EWaM",
+    "GEMINI_API_KEY"
 )
 
 # Model list in preference order.  Each has its own per-model RPM quota

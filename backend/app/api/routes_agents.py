@@ -104,7 +104,6 @@ async def multi_agent_simulate(req: AgentSimRequest):
 
     # ── Determine each agent's action ───────────────────────────
     agent_actions: dict = {}
-    heuristic_requested = False
 
     for agent_name in req.agents:
         if agent_name == "custom":
@@ -114,9 +113,20 @@ async def multi_agent_simulate(req: AgentSimRequest):
             }
 
         elif agent_name == "heuristic":
-            # Heuristic agent trajectories are fully Gemini-generated
-            # (no mathematical models). Handled after other agents run.
-            heuristic_requested = True
+            # Monte-Carlo stochastic-loss optimiser: grid-search over
+            # candidate rate changes and pick the one with lowest loss.
+            heuristic_action = _heuristic_optimize(
+                engine,
+                alpha=req.alpha,
+                beta=req.beta,
+                gamma=req.gamma,
+                lam=req.lam,
+                N=min(req.N, 1500),
+                H=req.H,
+                shocks=req.shocks,
+                regime_switching=req.regime_switching,
+            )
+            agent_actions["heuristic"] = heuristic_action
 
         elif agent_name == "rl":
             agent_actions["rl"] = _resolve_rl_action(store, mu_T, stress_score)
@@ -168,8 +178,8 @@ async def multi_agent_simulate(req: AgentSimRequest):
                 continue
             # If we can't get actual data (e.g. date near the end), fall through to MC
 
-        # RL / Custom agents from historical date: counterfactual over actual data
-        if agent_name in ("rl", "custom") and req.start_date and hist_bps_for_cf is not None:
+        # RL / Custom / Heuristic agents from historical date: counterfactual over actual data
+        if agent_name in ("rl", "custom", "heuristic") and req.start_date and hist_bps_for_cf is not None:
             cf_result = _build_counterfactual_paths(
                 store, req.start_date, req.H,
                 agent_bps=action["delta_bps"],
@@ -230,51 +240,6 @@ async def multi_agent_simulate(req: AgentSimRequest):
             "stress_fan": [s["stress_fan"] for s in sim_steps],
             "growth_fan": [s["growth_fan"] for s in sim_steps],
         }
-
-    # ── Generate heuristic agent via Gemini (no MC models) ───
-    if heuristic_requested:
-        try:
-            from app.api.routes_gemini import generate_heuristic_trajectories
-
-            growth_factor = float(mu_T[2]) if len(mu_T) > 2 else 0.0
-            inflation_gap = float(latest.get("inflation_gap", 0.0))
-            fed_rate_val = float(latest.get("fed_rate", 0.03))
-            regime_label = str(latest.get("regime_label", "Unknown"))
-
-            heuristic_result = await generate_heuristic_trajectories(
-                H=req.H,
-                reference_agents=results,
-                stress_score=float(stress_score),
-                growth_factor=growth_factor,
-                inflation_gap=inflation_gap,
-                fed_rate=fed_rate_val,
-                regime=regime_label,
-                alpha=req.alpha,
-                beta=req.beta,
-                gamma=req.gamma,
-                lam=req.lam,
-            )
-            results["heuristic"] = heuristic_result
-        except Exception as e:
-            logger.error(f"Heuristic Gemini generation failed: {e}")
-            results["heuristic"] = {
-                "agent": "heuristic",
-                "label": "Heuristic (unavailable)",
-                "delta_bps": 0,
-                "error": str(e),
-                "metrics": {
-                    "mean_stress": 0,
-                    "mean_growth_penalty": 0,
-                    "mean_es95": 0,
-                    "crisis_end": 0,
-                    "total_loss": 0,
-                },
-                "crisis_prob_path": [],
-                "stress_path": [],
-                "growth_path": [],
-                "stress_fan": [],
-                "growth_fan": [],
-            }
 
     return {
         "start_date": req.start_date,
@@ -340,6 +305,52 @@ def _resolve_rl_action(
             "label": "RL Agent (unavailable → Hold)",
             "error": str(e),
         }
+
+
+def _heuristic_optimize(
+    engine: "MonteCarloEngine",
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    gamma: float = 1.0,
+    lam: float = 1.0,
+    N: int = 1500,
+    H: int = 24,
+    shocks: dict | None = None,
+    regime_switching: bool = True,
+) -> dict:
+    """
+    Monte-Carlo stochastic-loss optimizer for the heuristic agent.
+
+    Evaluates a grid of candidate rate changes (−75 to +75 bps in 25-bps
+    increments) and returns the one that minimises total loss.  This is
+    a brute-force approach but quick enough for ~7 candidates × 1500 paths.
+    """
+    candidates = [-75, -50, -25, 0, 25, 50, 75]
+    best_bps = 0.0
+    best_loss = float("inf")
+    best_result = None
+
+    for delta in candidates:
+        seed = 42 + abs(hash(("heuristic", delta))) % 1000
+        ev = engine.evaluate_policy(
+            delta_bps=float(delta),
+            alpha=alpha, beta=beta, gamma=gamma, lam=lam,
+            N=N, H=H, shocks=shocks,
+            regime_switching=regime_switching, seed=seed,
+        )
+        if ev["total_loss"] < best_loss:
+            best_loss = ev["total_loss"]
+            best_bps = float(delta)
+            best_result = ev
+
+    logger.info(
+        f"Heuristic optimiser picked {best_bps:+.0f} bps "
+        f"(loss={best_loss:.4f}) from {len(candidates)} candidates"
+    )
+    return {
+        "delta_bps": best_bps,
+        "label": f"Heuristic ({best_bps:+.0f} bps)",
+    }
 
 
 def _get_historical_fed_change(store: dict, date_str: str) -> float:

@@ -146,10 +146,10 @@ export default function Home() {
     else setSnapshotState(null);
   }, [selectedDate]);
 
-  // Fetch Gemini insight whenever macro state refreshes (and no agent results yet)
-  useEffect(() => {
-    if (displayState && !agentResults) fetchGeminiInsight(null);
-  }, [displayState?.latest_date]);
+  // Gemini integration disabled — using pure MC-based agents
+  // useEffect(() => {
+  //   if (displayState && !agentResults) fetchGeminiInsight(null);
+  // }, [displayState?.latest_date]);
 
   /* ═══════════════════════════════════════════════════════════════
      API Helpers
@@ -303,14 +303,14 @@ export default function Home() {
       }
       const result = await res.json();
       setAgentResults(result.agents);
-      // Fire Gemini insight in background
-      fetchGeminiInsight(result.agents);
+      // Gemini integration disabled — using pure MC-based agents
+      // fetchGeminiInsight(result.agents);
     } catch (e: any) {
       setError(e.message);
     } finally {
       setIsRunning(false);
     }
-  }, [enabledAgents, params, selectedDate, fetchGeminiInsight]);
+  }, [enabledAgents, params, selectedDate]);
 
   const handleReset = useCallback(() => {
     setAgentResults(null);
@@ -397,11 +397,7 @@ export default function Home() {
                     </span>
                   )}
                 </span>
-                {geminiRecommendation && (
-                  <p className="text-[10px] mt-0.5 opacity-80 max-w-xl leading-snug">
-                    ✨ {geminiRecommendation}
-                  </p>
-                )}
+                {/* Gemini recommendation disabled — pure MC mode */}
               </div>
             </div>
             <div className="text-[10px] text-right opacity-70">
