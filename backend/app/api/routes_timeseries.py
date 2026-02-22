@@ -148,4 +148,5 @@ async def get_timeseries(years: int = Query(default=10, ge=1, le=40)):
         "crisis_probability": crisis_prob,
         "stress_mean": round(stress_mean, 6),
         "stress_std": round(stress_std, 6),
+        "regime_threshold_crisis": float(settings.regime_threshold_crisis),
     }

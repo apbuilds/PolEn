@@ -19,6 +19,7 @@ from app.api.routes_rl import router as rl_router
 from app.api.routes_historical import router as historical_router
 from app.api.routes_agents import router as agents_router
 from app.api.routes_timeseries import router as timeseries_router
+from app.api.routes_gemini import router as gemini_router
 from app.ws.sim_stream import handle_simulation
 
 logging.basicConfig(
@@ -67,6 +68,7 @@ app.include_router(rl_router)
 app.include_router(historical_router)
 app.include_router(agents_router)
 app.include_router(timeseries_router)
+app.include_router(gemini_router)
 
 
 # WebSocket endpoint
